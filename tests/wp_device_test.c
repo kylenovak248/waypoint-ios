@@ -51,6 +51,24 @@ static void *bad_peer_main(void *arg) {
 
 int main(void) {
     char *error = NULL;
+    setvbuf(stdout, NULL, _IONBF, 0);
+    alarm(120); // never let a hang stall the build
+    wp_pairing *idle = NULL;
+    char *idle_id = NULL;
+    uint8_t *idle_txt = NULL;
+    size_t idle_len = 0;
+    uint16_t idle_port = 0;
+
+    printf("cancel before accept\n");
+    int idle_status = wp_pairing_start("Waypoint-idle", &idle, &idle_id, &idle_txt, &idle_len, &idle_port, &error);
+    CHECK(idle_status == 0, "second pairing host starts");
+    wp_pairing_cancel(idle);
+    idle_status = wp_pairing_accept(idle, "/tmp/wp_should_not_exist.plist", NULL, NULL, NULL, NULL, &error);
+    CHECK(idle_status != 0, "accept returns at once after an earlier cancel");
+    if (error) { wp_string_free(error); error = NULL; }
+    wp_pairing_free(idle);
+    wp_string_free(idle_id);
+    wp_data_free(idle_txt, idle_len);
 
     printf("pairing host\n");
     wp_pairing *pairing = NULL;
