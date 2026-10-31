@@ -1,0 +1,98 @@
+name: Build Waypoint IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pick the newest Xcode
+        run: |
+          XCODE="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          echo "Using $XCODE"
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            build/idevice/target
+          key: idevice-${{ runner.os }}-${{ hashFiles('scripts/build_idevice.sh') }}
+
+      - name: Device-layer tests (host)
+        run: |
+          rustup show active-toolchain || rustup default stable
+          scripts/build_idevice.sh
+          # Host build of the same library for the C tests
+          (cd build/idevice/ffi && cargo build --release)
+          clang -std=c11 -Wall -Wextra -Werror -Wno-unused-result \
+            -I Vendor/idevice -o build/wp_device_test \
+            tests/wp_device_test.c Waypoint/Device/wp_device.c \
+            build/idevice/target/release/libidevice_ffi.a \
+            -framework Security -framework SystemConfiguration -framework CoreFoundation -lresolv
+          build/wp_device_test
+
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Build app
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -project Waypoint.xcodeproj \
+            -scheme Waypoint \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/Waypoint.xcarchive \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            | tee build/xcodebuild.log | grep -E "error:|warning: .*Waypoint/|BUILD|ARCHIVE" || true
+          test -d build/Waypoint.xcarchive/Products/Applications/Waypoint.app
+
+      - name: Package IPA
+        run: |
+          rm -rf Payload && mkdir Payload
+          cp -R build/Waypoint.xcarchive/Products/Applications/Waypoint.app Payload/
+          zip -qry Waypoint.ipa Payload
+          ls -la Waypoint.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Waypoint-ipa
+          path: Waypoint.ipa
+
+      - name: Publish release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="build-${GITHUB_RUN_NUMBER}"
+          gh release create "$TAG" Waypoint.ipa \
+            --title "Waypoint for iPhone (build ${GITHUB_RUN_NUMBER})" \
+            --notes "Unsigned IPA. Install it with SideStore, AltStore or Sideloadly, which sign it with your Apple ID." \
+            --latest
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: build/xcodebuild.log
