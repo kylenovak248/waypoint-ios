@@ -38,7 +38,7 @@ jobs:
       - name: Device-layer tests (host)
         run: |
           rustup show active-toolchain || rustup default stable
-          scripts/build_idevice.sh
+          bash scripts/build_idevice.sh
           # Host build of the same library for the C tests
           (cd build/idevice/ffi && cargo build --release)
           clang -std=c11 -Wall -Wextra -Werror -Wno-unused-result \
