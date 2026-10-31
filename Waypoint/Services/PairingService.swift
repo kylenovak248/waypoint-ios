@@ -52,7 +52,9 @@ final class PairingService: ObservableObject {
         self.pairing = pairing
 
         guard let record = Self.txtRecord(from: txtData) else {
-            stop(with: .failed("Pairing information was invalid"))
+            self.pairing = nil
+            wp_pairing_free(pairing)
+            phase = .failed("Pairing information was invalid")
             return
         }
         let netService = NetService(domain: "", type: "_remotepairing-pairable-host._tcp.", name: service, port: Int32(port))
@@ -71,6 +73,8 @@ final class PairingService: ObservableObject {
             var error: UnsafeMutablePointer<CChar>?
             let status = wp_pairing_accept(OpaquePointer(bitPattern: handle), path, pairingPinCallback, context,
                                            &isLocal, &name, &error)
+            // This thread owns the handle: free it only once accept has returned.
+            wp_pairing_free(OpaquePointer(bitPattern: handle))
             let deviceName = name.map { String(cString: $0) } ?? "iPhone"
             wp_string_free(name)
             let message = status == 0 ? nil : DeviceError.take(error, fallback: "Pairing failed")
@@ -105,11 +109,9 @@ final class PairingService: ObservableObject {
         netService?.stop()
         netService = nil
         if let pairing {
+            // Wakes the accept thread, which then frees the handle itself.
             wp_pairing_cancel(pairing)
-            let handle = UInt(bitPattern: pairing)
             self.pairing = nil
-            // Free after the accept thread has returned.
-            DispatchQueue.global().asyncAfter(deadline: .now() + 2) { wp_pairing_free(OpaquePointer(bitPattern: handle)) }
         }
         if phase.isRunning { KeepAlive.shared.release() }
         phase = newPhase
