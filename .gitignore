@@ -1,0 +1,7 @@
+build/
+Payload/
+*.ipa
+Waypoint.xcodeproj/
+Vendor/idevice/*.a
+Vendor/idevice/idevice.h
+.DS_Store
