@@ -4,7 +4,9 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +19,9 @@
 struct wp_pairing {
     struct PairableHostHandle *host;
     int listener;
+    // Writing to wake[1] wakes a pending accept. Closing a listening socket
+    // from another thread does not unblock accept() on Apple platforms.
+    int wake[2];
 };
 
 struct wp_session {
@@ -129,10 +134,13 @@ int wp_pairing_start(const char *hostname,
     wp_pairing *pairing = calloc(1, sizeof(wp_pairing));
     uint8_t *txt_copy = malloc(txt_length ? txt_length : 1);
     char *service_copy = wp_strdup(service_id);
-    if (!pairing || !txt_copy || !service_copy) {
+    int wake[2] = {-1, -1};
+    if (!pairing || !txt_copy || !service_copy || pipe(wake) != 0) {
         free(pairing);
         free(txt_copy);
         free(service_copy);
+        if (wake[0] >= 0) close(wake[0]);
+        if (wake[1] >= 0) close(wake[1]);
         close(listener);
         pairable_host_free(host);
         idevice_string_free(service_id);
@@ -143,8 +151,11 @@ int wp_pairing_start(const char *hostname,
     idevice_string_free(service_id);
     idevice_data_free(txt, txt_length);
 
+    fcntl(wake[1], F_SETFL, fcntl(wake[1], F_GETFL) | O_NONBLOCK);
     pairing->host = host;
     pairing->listener = listener;
+    pairing->wake[0] = wake[0];
+    pairing->wake[1] = wake[1];
     *out_pairing = pairing;
     *out_service_id = service_copy;
     *out_txt_plist = txt_copy;
@@ -163,9 +174,21 @@ int wp_pairing_accept(wp_pairing *pairing,
     if (out_is_local) *out_is_local = 0;
     if (out_device_name) *out_device_name = NULL;
 
+    // Wait for either the iPhone to connect or wp_pairing_cancel.
+    for (;;) {
+        struct pollfd fds[2] = {{pairing->listener, POLLIN, 0}, {pairing->wake[0], POLLIN, 0}};
+        int ready = poll(fds, 2, -1);
+        if (ready < 0) {
+            if (errno == EINTR) continue;
+            return wp_fail(error, 5, "The iPhone could not connect");
+        }
+        if (fds[1].revents) return wp_fail(error, 5, "Pairing was cancelled");
+        if (fds[0].revents & POLLIN) break;
+        if (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) return wp_fail(error, 5, "Pairing was cancelled");
+    }
     int connection = accept(pairing->listener, NULL, NULL);
     if (connection < 0) {
-        return wp_fail(error, 5, (errno == EBADF || errno == EINVAL) ? "Pairing was cancelled" : "The iPhone could not connect");
+        return wp_fail(error, 5, "The iPhone could not connect");
     }
 
     struct sockaddr_in peer, local;
@@ -206,14 +229,18 @@ int wp_pairing_accept(wp_pairing *pairing,
 }
 
 void wp_pairing_cancel(wp_pairing *pairing) {
-    if (pairing && pairing->listener >= 0) {
-        shutdown(pairing->listener, SHUT_RDWR);
+    if (pairing && pairing->wake[1] >= 0) {
+        char byte = 1;
+        ssize_t written = write(pairing->wake[1], &byte, 1);
+        (void)written;
     }
 }
 
 void wp_pairing_free(wp_pairing *pairing) {
     if (!pairing) return;
     if (pairing->listener >= 0) close(pairing->listener);
+    if (pairing->wake[0] >= 0) close(pairing->wake[0]);
+    if (pairing->wake[1] >= 0) close(pairing->wake[1]);
     pairable_host_free(pairing->host);
     free(pairing);
 }
